@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import numpy as np
 import torch
 import wandb
@@ -27,7 +27,9 @@ def experiment(
         exp_prefix,
         variant,
 ):
-    device = variant.get('device', 'cuda')
+    device = variant.get('device', 'cuda:0')  # Force GPU 
+    print(torch.cuda.current_device())  # Prints the active GPU ID
+    print(torch.cuda.get_device_name(device))  # Prints the GPU name
     log_to_wandb = variant.get('log_to_wandb', False)
 
     env_name, dataset = variant['env'], variant['dataset']
@@ -36,7 +38,7 @@ def experiment(
     exp_prefix = f'{group_name}-{random.randint(int(1e5), int(1e6) - 1)}'
 
     if env_name == 'hopper':
-        env = gym.make('Hopper-v3')
+        env = gym.make('Hopper-v5')
         max_ep_len = 1000
         env_targets = [3600, 1800]  # evaluation conditioning targets
         scale = 1000.  # normalization for rewards/returns
@@ -66,7 +68,10 @@ def experiment(
     act_dim = env.action_space.shape[0]
 
     # load dataset
-    dataset_path = f'data/{env_name}-{dataset}-v2.pkl'
+    BASE_DIR = "/data1/home/nitinvetcha/Ashwin_KM_Code/Project_AI_ML/decision-transformer-master/gym/data"
+    if not env_name.startswith("mujoco_"):
+        env_name = f"mujoco_{env_name}"
+    dataset_path = f"{BASE_DIR}/{env_name}_{dataset}-v0.pkl"
     with open(dataset_path, 'rb') as f:
         trajectories = pickle.load(f)
 
@@ -127,15 +132,16 @@ def experiment(
         for i in range(batch_size):
             traj = trajectories[int(sorted_inds[batch_inds[i]])]
             si = random.randint(0, traj['rewards'].shape[0] - 1)
-
             # get sequences from dataset
             s.append(traj['observations'][si:si + max_len].reshape(1, -1, state_dim))
             a.append(traj['actions'][si:si + max_len].reshape(1, -1, act_dim))
             r.append(traj['rewards'][si:si + max_len].reshape(1, -1, 1))
-            if 'terminals' in traj:
-                d.append(traj['terminals'][si:si + max_len].reshape(1, -1))
-            else:
+            if 'dones' in traj:  # Old D4RL format
                 d.append(traj['dones'][si:si + max_len].reshape(1, -1))
+            elif 'terminals' in traj:  # Some versions use 'terminals'
+                d.append(traj['terminals'][si:si + max_len].reshape(1, -1))
+            elif 'terminations' in traj:  # Minari format
+                d.append(traj['terminations'][si:si + max_len].reshape(1, -1))
             timesteps.append(np.arange(si, si + s[-1].shape[1]).reshape(1, -1))
             timesteps[-1][timesteps[-1] >= max_ep_len] = max_ep_len-1  # padding cutoff
             rtg.append(discount_cumsum(traj['rewards'][si:], gamma=1.)[:s[-1].shape[1] + 1].reshape(1, -1, 1))
@@ -231,7 +237,7 @@ def experiment(
     else:
         raise NotImplementedError
 
-    model = model.to(device=device)
+    model = model.to(device)
 
     warmup_steps = variant['warmup_steps']
     optimizer = torch.optim.AdamW(
@@ -304,5 +310,4 @@ if __name__ == '__main__':
     parser.add_argument('--log_to_wandb', '-w', type=bool, default=False)
     
     args = parser.parse_args()
-
     experiment('gym-experiment', variant=vars(args))
