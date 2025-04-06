@@ -29,7 +29,6 @@ def evaluate_episode(
     actions = torch.zeros((0, act_dim), device=device, dtype=torch.float32)
     rewards = torch.zeros(0, device=device, dtype=torch.float32)
     target_return = torch.tensor(target_return, device=device, dtype=torch.float32)
-    sim_states = []
 
     episode_return, episode_length = 0, 0
     for t in range(max_ep_len):
