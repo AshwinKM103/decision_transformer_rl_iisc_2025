@@ -14,6 +14,22 @@ from decision_transformer.models.mlp_bc import MLPBCModel
 from decision_transformer.training.act_trainer import ActTrainer
 from decision_transformer.training.seq_trainer import SequenceTrainer
 
+REF_MIN_SCORE = {
+    'walker2d': 1.6,
+    'hopper': 1.6,
+    'halfcheetah': -280.178953
+}
+REF_MAX_SCORE = {
+    'walker2d': 4592.3,
+    'hopper': 3234.3,
+    'halfcheetah': 12135.0,
+}
+
+def get_normalised_returns(return_score, min_score, max_score):
+    # Normalize the returns to be between 0 and 1
+    norm_return = (return_score - min_score) / (max_score - min_score)
+    return norm_return * 100  # Scale to 100
+
 
 def discount_cumsum(x, gamma):
     discount_cumsum = np.zeros_like(x)
@@ -28,8 +44,6 @@ def experiment(
         variant,
 ):
     device = variant.get('device', 'cuda:0')  # Force GPU 
-    print(torch.cuda.current_device())  # Prints the active GPU ID
-    print(torch.cuda.get_device_name(device))  # Prints the GPU name
     log_to_wandb = variant.get('log_to_wandb', False)
 
     env_name, dataset = variant['env'], variant['dataset']
@@ -43,19 +57,19 @@ def experiment(
         env_targets = [3600, 1800]  # evaluation conditioning targets
         scale = 1000.  # normalization for rewards/returns
     elif env_name == 'halfcheetah':
-        env = gym.make('HalfCheetah-v3')
+        env = gym.make('HalfCheetah-v5')
         max_ep_len = 1000
         env_targets = [12000, 6000]
         scale = 1000.
     elif env_name == 'walker2d':
-        env = gym.make('Walker2d-v3')
+        env = gym.make('Walker2d-v5')
         max_ep_len = 1000
         env_targets = [5000, 2500]
         scale = 1000.
     elif env_name == 'reacher2d':
         from decision_transformer.envs.reacher_2d import Reacher2dEnv
         env = Reacher2dEnv()
-        max_ep_len = 100
+        max_ep_len = 200
         env_targets = [76, 40]
         scale = 10.
     else:
@@ -70,11 +84,16 @@ def experiment(
     # load dataset
     BASE_DIR = "/data1/home/nitinvetcha/Ashwin_KM_Code/Project_AI_ML/decision-transformer-master/gym/data"
     if not env_name.startswith("mujoco_"):
-        env_name = f"mujoco_{env_name}"
+        if env == 'reacher2d':
+            env_name = 'reacher'
+        else:
+            env_name = f"mujoco_{env_name}"
+    print(f"Loading dataset for {env_name} with dataset {dataset}")
     dataset_path = f"{BASE_DIR}/{env_name}_{dataset}-v0.pkl"
     with open(dataset_path, 'rb') as f:
         trajectories = pickle.load(f)
-
+        
+    
     # save all path information into separate lists
     mode = variant.get('mode', 'normal')
     states, traj_lens, returns = [], [], []
@@ -86,6 +105,7 @@ def experiment(
         traj_lens.append(len(path['observations']))
         returns.append(path['rewards'].sum())
     traj_lens, returns = np.array(traj_lens), np.array(returns)
+    
 
     # used for input normalization
     states = np.concatenate(states, axis=0)
@@ -98,7 +118,15 @@ def experiment(
     print(f'{len(traj_lens)} trajectories, {num_timesteps} timesteps found')
     print(f'Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}')
     print(f'Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}')
+    env_name = env_name.replace('mujoco_', '')
+    # Normalise the returns to be between 0 and 100
+    norm_returns = get_normalised_returns(np.mean(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name])
+    print(f'Normalised return: {norm_returns:.2f}')
+    print(f'Normalised max return: {get_normalised_returns(np.max(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name]):.2f}')
+    print(f'Normalised min return: {get_normalised_returns(np.min(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name]):.2f}')
+    print(f'Normalised std: {get_normalised_returns(np.std(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name]):.2f}')
     print('=' * 50)
+    
 
     K = variant['K']
     batch_size = variant['batch_size']
@@ -203,11 +231,14 @@ def experiment(
                         )
                 returns.append(ret)
                 lengths.append(length)
+            
+            
             return {
                 f'target_{target_rew}_return_mean': np.mean(returns),
                 f'target_{target_rew}_return_std': np.std(returns),
                 f'target_{target_rew}_length_mean': np.mean(lengths),
                 f'target_{target_rew}_length_std': np.std(lengths),
+                
             }
         return fn
 
