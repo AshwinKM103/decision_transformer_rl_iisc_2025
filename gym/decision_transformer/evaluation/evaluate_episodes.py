@@ -88,6 +88,11 @@ def evaluate_episode_rtg(
     if mode == 'noise':
         state = state + np.random.normal(0, 0.1, size=state.shape)
 
+    # Capture the first frame if rendering
+    if render and frame_collector is not None:
+        frame = env.render()
+        frame_collector.append(frame)
+
     states = torch.from_numpy(state).reshape(1, state_dim).to(device=device, dtype=torch.float32)
     actions = torch.zeros((0, act_dim), device=device, dtype=torch.float32)
     rewards = torch.zeros(0, device=device, dtype=torch.float32)
@@ -104,10 +109,6 @@ def evaluate_episode_rtg(
     k_buffer_size = min(20, max_ep_len)  # Match the context length K used in training
     
     for t in range(max_ep_len):
-        if render and frame_collector is not None:
-            frame = env.render()
-            frame_collector.append(frame)
-
         actions = torch.cat([actions, torch.zeros((1, act_dim), device=device)], dim=0)
         rewards = torch.cat([rewards, torch.zeros(1, device=device)])
 
@@ -136,7 +137,12 @@ def evaluate_episode_rtg(
         state, reward, terminated, truncated, info = env.step(action_np)
         done = terminated or truncated
         
-        # Logging code remains the same
+        # Capture frame after taking action if rendering
+        if render and frame_collector is not None:
+            frame = env.render()
+            frame_collector.append(frame)
+        
+        # Optional: Log actions and states for debugging
         input_state = ((states[-1] - state_mean_tensor) / state_std_tensor).detach().cpu().numpy()
         with open("eval_action_log.txt", "a") as f:
             f.write(f"[Step {t}] State: {input_state}\n")
@@ -168,5 +174,4 @@ def evaluate_episode_rtg(
         if done:
             break
 
-    env.close()
     return episode_return, episode_length

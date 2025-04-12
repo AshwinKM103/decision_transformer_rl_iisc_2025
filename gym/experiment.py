@@ -9,13 +9,13 @@ import random
 import sys
 import matplotlib.pyplot as plt
 import os
+import imageio
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode, evaluate_episode_rtg
 from decision_transformer.models.decision_transformer import DecisionTransformer
 from decision_transformer.models.mlp_bc import MLPBCModel
 from decision_transformer.training.act_trainer import ActTrainer
 from decision_transformer.training.seq_trainer import SequenceTrainer
-import imageio
 
 REF_MIN_SCORE = {
     'halfcheetah': -79.20,
@@ -43,9 +43,15 @@ def discount_cumsum(x, gamma):
     return discount_cumsum
 
 
-def experiment(exp_prefix,variant,):
+def experiment(exp_prefix, variant):
     device = variant.get('device', 'cuda:0')  # Force GPU
     log_to_wandb = variant.get('log_to_wandb', False)
+    save_videos = variant.get('save_videos', True)  # Add option to save videos
+    video_dir = variant.get('video_dir', 'videos')  # Directory to save videos
+    
+    # Create video directory if it doesn't exist
+    if save_videos and not os.path.exists(video_dir):
+        os.makedirs(video_dir)
 
     env_name, dataset = variant['env'], variant['dataset']
     model_type = variant['model_type']
@@ -85,20 +91,19 @@ def experiment(exp_prefix,variant,):
     # load dataset
     BASE_DIR = os.path.join(os.path.dirname(__file__), 'data')
     if not env_name.startswith("mujoco_"):
-        if env == 'reacher2d':
-            env_name = 'reacher'
+        if env_name == 'reacher2d':
+            dataset_env_name = 'reacher'
         else:
-            env_name = f"mujoco_{env_name}"
-    print(f"Loading dataset for {env_name} with dataset {dataset}")
-    dataset_path = f"{BASE_DIR}/{env_name}_{dataset}-v0.pkl"
+            dataset_env_name = f"mujoco_{env_name}"
+    else:
+        dataset_env_name = env_name
+        
+    print(f"Loading dataset for {dataset_env_name} with dataset {dataset}")
+    dataset_path = f"{BASE_DIR}/{dataset_env_name}_{dataset}-v0.pkl"
     with open(dataset_path, 'rb') as f:
         trajectories = pickle.load(f)
-        
     
     # save all path information into separate lists
-    # trajectories is a list of dictionaries
-    # Each dictionary contains observations, actions, rewards, terminals and terminations
-    
     mode = variant.get('mode', 'normal')
     states, traj_lens, returns = [], [], []
     for path in trajectories:
@@ -110,7 +115,6 @@ def experiment(exp_prefix,variant,):
         returns.append(path['rewards'].sum())
     traj_lens, returns = np.array(traj_lens), np.array(returns)
     
-
     # used for input normalization
     states = np.concatenate(states, axis=0)
     state_mean, state_std = np.mean(states, axis=0), np.std(states, axis=0) + 1e-6
@@ -122,15 +126,14 @@ def experiment(exp_prefix,variant,):
     print(f'{len(traj_lens)} trajectories, {num_timesteps} timesteps found')
     print(f'Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}')
     print(f'Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}')
-    env_name = env_name.replace('mujoco_', '')
+    basic_env_name = env_name.replace('mujoco_', '')
    
-    norm_returns = get_normalised_returns(np.mean(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name])
+    norm_returns = get_normalised_returns(np.mean(returns), REF_MIN_SCORE[basic_env_name], REF_MAX_SCORE[basic_env_name])
     print(f'Normalised return: {norm_returns:.2f}')
-    print(f'Normalised max return: {get_normalised_returns(np.max(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name]):.2f}')
-    print(f'Normalised min return: {get_normalised_returns(np.min(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name]):.2f}')
-    print(f'Normalised std: {get_normalised_returns(np.std(returns), REF_MIN_SCORE[env_name], REF_MAX_SCORE[env_name]):.2f}')
+    print(f'Normalised max return: {get_normalised_returns(np.max(returns), REF_MIN_SCORE[basic_env_name], REF_MAX_SCORE[basic_env_name]):.2f}')
+    print(f'Normalised min return: {get_normalised_returns(np.min(returns), REF_MIN_SCORE[basic_env_name], REF_MAX_SCORE[basic_env_name]):.2f}')
+    print(f'Normalised std: {get_normalised_returns(np.std(returns), REF_MIN_SCORE[basic_env_name], REF_MAX_SCORE[basic_env_name]):.2f}')
     print('=' * 50)
-    
 
     K = variant['K']
     batch_size = variant['batch_size']
@@ -210,10 +213,10 @@ def experiment(exp_prefix,variant,):
     def eval_episodes(target_rew):
         def fn(model):
             returns, lengths = [], []
-            for _ in range(num_eval_episodes):
+            for episode in range(num_eval_episodes):
                 with torch.no_grad():
                     if model_type == 'dt':
-                        frames = []
+                        frames = []  # Initialize frames list
                         ret, length = evaluate_episode_rtg(
                             env,
                             state_dim,
@@ -226,10 +229,32 @@ def experiment(exp_prefix,variant,):
                             state_mean=state_mean,
                             state_std=state_std,
                             device=device,
-                            render=True
+                            render=save_videos,  # Only render if we're saving videos
+                            frame_collector=frames  # Pass the frames list
                         )
-
-                        imageio.mimsave("hopper_eval.gif", frames, fps=30)
+                        
+                        # Save video if requested
+                        if save_videos and len(frames) > 0:
+                            # Only save videos periodically to avoid flooding disk
+                            if episode == 0 or episode == num_eval_episodes - 1:
+                                video_path = os.path.join(
+                                    video_dir, 
+                                    f"{env_name}_{dataset}_{target_rew}_ep{episode}_iter{trainer.current_iteration}.gif"
+                                )
+                                print(f"Saving video to {video_path}")
+                                try:
+                                    imageio.mimsave(video_path, frames, fps=30)
+                                except Exception as e:
+                                    print(f"Error saving video: {e}")
+                                    
+                                # Also save a few select frames as images for debugging
+                                if len(frames) > 10:
+                                    for idx in [0, len(frames)//2, -1]:
+                                        img_path = os.path.join(
+                                            video_dir,
+                                            f"{env_name}_{dataset}_{target_rew}_ep{episode}_frame{idx}.png"
+                                        )
+                                        imageio.imwrite(img_path, frames[idx])
                     else:
                         ret, length = evaluate_episode(
                             env,
@@ -246,10 +271,11 @@ def experiment(exp_prefix,variant,):
                 returns.append(ret)
                 lengths.append(length)
             
-            
             return {
                 f'target_{target_rew}_return_mean': np.mean(returns),
-                f'target_{target_rew}_return_std': np.std(returns)  
+                f'target_{target_rew}_return_std': np.std(returns),
+                f'target_{target_rew}_length_mean': np.mean(lengths),
+                f'target_{target_rew}_length_std': np.std(lengths)
             }
         return fn
 
@@ -323,9 +349,44 @@ def experiment(exp_prefix,variant,):
         # wandb.watch(model)  # wandb has some bug
 
     for iter in range(variant['max_iters']):
+        trainer.current_iteration = iter  # Track iteration for video saving
         outputs = trainer.train_iteration(num_steps=variant['num_steps_per_iter'], iter_num=iter+1, print_logs=True)
+        
         if log_to_wandb:
             wandb.log(outputs)
+            
+        # Save model periodically
+        if (iter + 1) % 10 == 0 or iter == variant['max_iters'] - 1:
+            model_path = os.path.join(video_dir, f"{env_name}_{dataset}_model_iter{iter}.pt")
+            torch.save(model.state_dict(), model_path)
+            print(f"Model saved to {model_path}")
+            
+    # Generate a final evaluation video with the best model
+    if save_videos and model_type == 'dt':
+        print("Generating final evaluation videos...")
+        for target_rew in env_targets:
+            frames = []
+            with torch.no_grad():
+                ret, length = evaluate_episode_rtg(
+                    env,
+                    state_dim,
+                    act_dim,
+                    model,
+                    max_ep_len=max_ep_len,
+                    scale=scale,
+                    target_return=target_rew/scale,
+                    mode=mode,
+                    state_mean=state_mean,
+                    state_std=state_std,
+                    device=device,
+                    render=True,
+                    frame_collector=frames
+                )
+                
+                if len(frames) > 0:
+                    video_path = os.path.join(video_dir, f"{env_name}_{dataset}_final_target{target_rew}.gif")
+                    print(f"Saving final video to {video_path} (return: {ret:.2f})")
+                    imageio.mimsave(video_path, frames, fps=30)
 
 
 if __name__ == '__main__':
@@ -345,11 +406,13 @@ if __name__ == '__main__':
     parser.add_argument('--learning_rate', '-lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=1000)
-    parser.add_argument('--num_eval_episodes', type=int, default=100) # Default = 100
+    parser.add_argument('--num_eval_episodes', type=int, default=100)  # Default = 100
     parser.add_argument('--max_iters', type=int, default=50)
-    parser.add_argument('--num_steps_per_iter', type=int, default=1000) # Default = 10000
+    parser.add_argument('--num_steps_per_iter', type=int, default=1000)  # Default = 10000
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_to_wandb', '-w', type=bool, default=False)
+    parser.add_argument('--save_videos', type=bool, default=True)  # Option to save videos
+    parser.add_argument('--video_dir', type=str, default='videos')  # Directory to save videos
     
     args = parser.parse_args()
     experiment('gym-experiment', variant=vars(args))
