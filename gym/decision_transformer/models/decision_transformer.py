@@ -63,7 +63,13 @@ class DecisionTransformer(TrajectoryModel):
         state_embeddings = self.embed_state(states)
         action_embeddings = self.embed_action(actions)
         returns_embeddings = self.embed_return(returns_to_go)
+        print(type(returns_embeddings))
+        print(len(returns_embeddings[0]))
         time_embeddings = self.embed_timestep(timesteps)
+        print(type(time_embeddings))
+        print(len(time_embeddings[0]))
+        print(len(state_embeddings[0]))
+        print(len(action_embeddings[0]))
 
         # time embeddings are treated similar to positional embeddings
         state_embeddings = state_embeddings + time_embeddings

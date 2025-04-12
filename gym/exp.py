@@ -32,7 +32,7 @@ REF_MAX_SCORE = {
 def get_normalised_returns(return_score, min_score, max_score):
     # Normalize the returns to be between 0 and 1
     norm_return = (return_score - min_score) / (max_score - min_score)
-    return norm_return * 100  # Scale to 100
+    return max(0,norm_return * 100)  # Scale to 100
 
 
 def discount_cumsum(x, gamma):
@@ -154,54 +154,75 @@ def experiment(exp_prefix,variant,):
 
     def get_batch(batch_size=256, max_len=K):
         batch_inds = np.random.choice(
-            np.arange(num_trajectories),
-            size=batch_size,
-            replace=True,
-            p=p_sample,  # reweights so we sample according to timesteps
-        )
+        np.arange(num_trajectories),
+        size=batch_size,
+        replace=True,
+        p=p_sample
+                    )
 
         s, a, r, d, rtg, timesteps, mask = [], [], [], [], [], [], []
+
         for i in range(batch_size):
             traj = trajectories[int(sorted_inds[batch_inds[i]])]
-            si = random.randint(0, traj['rewards'].shape[0] - 1)
-            # get sequences from dataset
-            s.append(traj['observations'][si:si + max_len].reshape(1, -1, state_dim))
-            a.append(traj['actions'][si:si + max_len].reshape(1, -1, act_dim))
-            r.append(traj['rewards'][si:si + max_len].reshape(1, -1, 1))
-            if 'dones' in traj:  # Old D4RL format
-                d.append(traj['dones'][si:si + max_len].reshape(1, -1))
-            elif 'terminals' in traj:  # Some versions use 'terminals'
-                d.append(traj['terminals'][si:si + max_len].reshape(1, -1))
-            elif 'terminations' in traj:  # Minari format
-                d.append(traj['terminations'][si:si + max_len].reshape(1, -1))
-            timesteps.append(np.arange(si, si + s[-1].shape[1]).reshape(1, -1))
-            timesteps[-1][timesteps[-1] >= max_ep_len] = max_ep_len-1  # padding cutoff
-            rtg.append(discount_cumsum(traj['rewards'][si:], gamma=1.)[:s[-1].shape[1] + 1].reshape(1, -1, 1))
-            if rtg[-1].shape[1] <= s[-1].shape[1]:
-                rtg[-1] = np.concatenate([rtg[-1], np.zeros((1, 1, 1))], axis=1)
+            traj_len = traj['rewards'].shape[0]
 
-            # padding and state + reward normalization
-            tlen = s[-1].shape[1]
-            s[-1] = np.concatenate([np.zeros((1, max_len - tlen, state_dim)) * -10., s[-1]], axis=1)
-            s[-1] = (s[-1] - state_mean) / state_std
-            a[-1] = np.concatenate([np.ones((1, max_len - tlen, act_dim)), a[-1]], axis=1)
-            r[-1] = np.concatenate([np.zeros((1, max_len - tlen, 1)), r[-1]], axis=1)
-            d[-1] = np.concatenate([np.ones((1, max_len - tlen)) * 2, d[-1]], axis=1)
-            rtg[-1] = np.concatenate([np.zeros((1, max_len - tlen, 1)), rtg[-1]], axis=1) / scale
-            timesteps[-1] = np.concatenate([np.zeros((1, max_len - tlen)), timesteps[-1]], axis=1)
-            mask.append(np.concatenate([np.zeros((1, max_len - tlen)), np.ones((1, tlen))], axis=1))
+            si = random.randint(max_len - 1, traj_len - 1)  # ensure enough past context
 
+            # ===== STATE WINDOW =====
+            s_window = traj['observations'][si - max_len + 1: si + 1]
+            pad_len = max_len - s_window.shape[0]
+            if pad_len > 0:
+                s_window = np.concatenate([np.zeros((pad_len, state_dim)), s_window], axis=0)
+            s_window = (s_window - state_mean) / state_std
+            s.append(s_window.reshape(1, max_len, state_dim))
+
+            # ===== ACTION TARGET =====
+            a_t = traj['actions'][si].reshape(1, 1, act_dim)
+            a.append(a_t)
+
+            # ===== REWARD WINDOW =====
+            r_window = traj['rewards'][si - max_len + 1: si + 1].reshape(-1, 1)
+            if pad_len > 0:
+                r_window = np.concatenate([np.zeros((pad_len, 1)), r_window], axis=0)
+            r.append(r_window.reshape(1, max_len, 1))
+
+            # ===== DONE/TERMINAL =====
+            done_key = 'dones' if 'dones' in traj else ('terminals' if 'terminals' in traj else 'terminations')
+            d_window = traj[done_key][si - max_len + 1: si + 1]
+            if pad_len > 0:
+                d_window = np.concatenate([np.ones((pad_len,)) * 2, d_window], axis=0)
+            d.append(d_window.reshape(1, max_len))
+
+            # ===== TIMESTEPS =====
+            ts_window = np.arange(si - max_len + 1, si + 1)
+            ts_window[ts_window < 0] = 0
+            ts_window[ts_window >= max_ep_len] = max_ep_len - 1
+            timesteps.append(ts_window.reshape(1, max_len))
+
+            # ===== RTG =====
+            rtg_window = discount_cumsum(traj['rewards'][si:], gamma=1.)[:max_len].reshape(1, -1, 1)
+            if rtg_window.shape[1] < max_len:
+                # Pad with zeros if the RTG sequence is shorter than max_len
+                padding_size = max_len - rtg_window.shape[1]
+                rtg_window = np.concatenate([rtg_window, np.zeros((1, padding_size, 1))], axis=1)
+            rtg.append(rtg_window / scale)
+
+            # ===== MASK =====
+            m = np.concatenate([np.zeros((1, pad_len)), np.ones((1, max_len - pad_len))], axis=1)
+            mask.append(m)
+
+        # === STACK BATCHES ===
         s = torch.from_numpy(np.concatenate(s, axis=0)).to(dtype=torch.float32, device=device)
         a = torch.from_numpy(np.concatenate(a, axis=0)).to(dtype=torch.float32, device=device)
         r = torch.from_numpy(np.concatenate(r, axis=0)).to(dtype=torch.float32, device=device)
         d = torch.from_numpy(np.concatenate(d, axis=0)).to(dtype=torch.long, device=device)
         rtg = torch.from_numpy(np.concatenate(rtg, axis=0)).to(dtype=torch.float32, device=device)
         timesteps = torch.from_numpy(np.concatenate(timesteps, axis=0)).to(dtype=torch.long, device=device)
-        mask = torch.from_numpy(np.concatenate(mask, axis=0)).to(device=device)
-        
+        mask = torch.from_numpy(np.concatenate(mask, axis=0)).to(dtype=torch.float32, device=device)
+
         with open("debug_output.txt", "w") as f:
             f.write("Sample state: " + str(s[0, -1].cpu().numpy()) + "\n")
-            f.write("Sample action: " + str(a[0, -1].cpu().numpy()) + "\n")
+            f.write("Sample action: " + str(a[0, 0].cpu().numpy()) + "\n")
             f.write("Sample mask: " + str(mask[0].cpu().numpy()) + "\n")
             f.write("Sample RTG: " + str(rtg[0].cpu().numpy()) + "\n")
 
@@ -210,10 +231,9 @@ def experiment(exp_prefix,variant,):
     def eval_episodes(target_rew):
         def fn(model):
             returns, lengths = [], []
-            for _ in range(num_eval_episodes):
+            for episode_num in range(num_eval_episodes):
                 with torch.no_grad():
                     if model_type == 'dt':
-                        frames = []
                         ret, length = evaluate_episode_rtg(
                             env,
                             state_dim,
@@ -226,10 +246,11 @@ def experiment(exp_prefix,variant,):
                             state_mean=state_mean,
                             state_std=state_std,
                             device=device,
-                            render=True
+                            render=True,
+                            save_video=True,
+                            video_folder=f"videos/target_{target_rew}",
+                            video_name=f"hopper_episode{episode_num}"
                         )
-
-                        imageio.mimsave("hopper_eval.gif", frames, fps=30)
                     else:
                         ret, length = evaluate_episode(
                             env,
@@ -243,8 +264,8 @@ def experiment(exp_prefix,variant,):
                             state_std=state_std,
                             device=device,
                         )
-                returns.append(ret)
-                lengths.append(length)
+                    returns.append(ret)
+                    lengths.append(length)
             
             
             return {
@@ -280,6 +301,8 @@ def experiment(exp_prefix,variant,):
         raise NotImplementedError
 
     model = model.to(device)
+
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
 
     warmup_steps = variant['warmup_steps']
     optimizer = torch.optim.AdamW(
@@ -333,21 +356,21 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
     parser.add_argument('--mode', type=str, default='normal')  # normal for standard setting, delayed for sparse
-    parser.add_argument('--K', type=int, default=20)
+    parser.add_argument('--K', type=int, default=40)
     parser.add_argument('--pct_traj', type=float, default=1.)
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--model_type', type=str, default='dt')  # dt for decision transformer, bc for behavior cloning
-    parser.add_argument('--embed_dim', type=int, default=128)
-    parser.add_argument('--n_layer', type=int, default=3)
-    parser.add_argument('--n_head', type=int, default=1)
+    parser.add_argument('--embed_dim', type=int, default=256)  # Increased from 128
+    parser.add_argument('--n_layer', type=int, default=4)  # Increased from 3
+    parser.add_argument('--n_head', type=int, default=4)  # Increased from 1
     parser.add_argument('--activation_function', type=str, default='relu')
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--learning_rate', '-lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=1000)
     parser.add_argument('--num_eval_episodes', type=int, default=100) # Default = 100
-    parser.add_argument('--max_iters', type=int, default=50)
-    parser.add_argument('--num_steps_per_iter', type=int, default=1000) # Default = 10000
+    parser.add_argument('--max_iters', type=int, default=100)
+    parser.add_argument('--num_steps_per_iter', type=int, default=2000)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_to_wandb', '-w', type=bool, default=False)
     

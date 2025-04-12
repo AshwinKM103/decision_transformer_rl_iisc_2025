@@ -4,17 +4,17 @@ import torch
 import time
 
 REF_MIN_SCORE = {
-    'walker2d': 1.6,
-    'hopper': 1.6,
-    'halfcheetah': -280.178953,
-    'ant': 0.0,
+    'halfcheetah': -79.20,
+    'hopper': 395.64,
+    'walker2d': 0.20,
 }
+
 REF_MAX_SCORE = {
-    'walker2d': 4592.3,
-    'hopper': 3234.3,
-    'halfcheetah': 12135.0,
-    'ant': 6444.0,
+    'halfcheetah': 16584.93,
+    'hopper': 4376.33,
+    'walker2d': 6972.80,
 }
+
 
 
 class Trainer:
@@ -54,7 +54,7 @@ class Trainer:
             outputs = eval_fn(self.model)
             for k, v in outputs.items():
                 logs[f'evaluation/{k}'] = v
-                logs[f'evaluation_normalised'/{k}] = (v - REF_MIN_SCORE['hopper'])/ (REF_MAX_SCORE['hopper'] - REF_MIN_SCORE['hopper'])
+                logs[f'evaluation_normalised/{k}'] = 100 * (v - REF_MIN_SCORE['hopper']) / (REF_MAX_SCORE['hopper'] - REF_MIN_SCORE['hopper'])
 
         logs['time/total'] = time.time() - self.start_time
         logs['time/evaluation'] = time.time() - eval_start
